@@ -30,3 +30,16 @@
 *.exe
 *.out
 *.app
+
+# 
+bin/
+lib/
+build/
+data/
+CMakeFiles
+Makefile
+CMakeFiles/
+*.kdev4
+*.cake
+*.txt
+
