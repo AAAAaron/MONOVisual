@@ -58,11 +58,28 @@ bool MONOVisualOdometry::addFrame(Frame::Ptr frame)
   {
     case INITIALIZING:
     {
-      state_=OK;
-      curr_=ref_=frame;
-      extractKeyPoints();
-      computeDescriptors();
-      addKeyFrame();
+      
+      
+      if(num_frame==2)
+      {
+	curr_=frame;
+	state_=OK;
+	extractKeyPoints();
+	computeDescriptors();
+	featureMatchingInit();
+	pose_estimation_2d2d();
+	num_frame=0;
+      }
+      if(num_frame==1)
+      {
+	curr_=ref_=frame;
+	state_=INITIALIZING;
+	extractKeyPoints();
+	computeDescriptors();
+	addFirstFrame();
+      }
+
+//       addKeyFrame();
       break;
     }
     case OK:
@@ -150,6 +167,68 @@ void MONOVisualOdometry::featureMatching()
     cout<<"good matches: "<<match_3dpts_.size() <<endl;
     cout<<"match cost time: "<<timer.elapsed() <<endl;  
 }
+//用于对于开头两张照片完成特征匹配
+void MONOVisualOdometry::featureMatchingInit()
+{
+//     Mat descriptors_1, descriptors_2;
+    // used in OpenCV3 
+//     Ptr<FeatureDetector> detector = ORB::create();
+//     Ptr<DescriptorExtractor> descriptor = ORB::create();
+    // use this if you are in OpenCV2 
+    // Ptr<FeatureDetector> detector = FeatureDetector::create ( "ORB" );
+    // Ptr<DescriptorExtractor> descriptor = DescriptorExtractor::create ( "ORB" );
+//     Ptr<DescriptorMatcher> matcher  = DescriptorMatcher::create("BruteForce-Hamming");
+    //-- 第一步:检测 Oriented FAST 角点位置
+//     detector->detect ( img_1,keypoints_1 );
+//     detector->detect ( img_2,keypoints_2 );
+
+    //-- 第二步:根据角点位置计算 BRIEF 描述子
+//     descriptor->compute ( img_1, keypoints_1, descriptors_1 );
+//     descriptor->compute ( img_2, keypoints_2, descriptors_2 );
+
+    //-- 第三步:对两幅图像中的BRIEF描述子进行匹配，使用 Hamming 距离
+    vector<cv::DMatch> match;
+   // BFMatcher matcher ( NORM_HAMMING );
+    
+    matcher_flann_.match ( descriptors_ref_, descriptors_curr_, match );
+
+    //-- 第四步:匹配点对筛选
+    double min_dist=10000, max_dist=0;
+
+    //找出所有匹配之间的最小距离和最大距离, 即是最相似的和最不相似的两组点之间的距离
+    for ( int i = 0; i < descriptors_1.rows; i++ )
+    {
+        double dist = match[i].distance;
+        if ( dist < min_dist ) min_dist = dist;
+        if ( dist > max_dist ) max_dist = dist;
+    }
+
+    for ( int i = 0; i < descriptors_1.rows; i++ )
+    {
+        if ( match[i].distance <= max ( 2*min_dist, 30.0 ) )
+        {
+            matches.push_back ( match[i] );
+        }
+    }
+  float min_dis=std::min_element(matches.begin(),matches.end(),[](const cv::DMatch& m1,const cv::DMatch& m2)
+  {
+    return m1.distance<m2.distance;
+  }).distance;
+  match_3dpts_.clear();
+  match_2dkp_index_.clear();
+  for(cv::DMatch& m:matches)
+  {
+    if(m.distance<max <float>(min_dis*match_ratio_,30.0))
+    {
+      match_3dpts_.push_back(candidate[m.queryIdx]);
+      match_2dkp_index_.push_back(m.trainIdx);
+    }
+  }
+    cout<<"good matches: "<<match_3dpts_.size() <<endl;
+    cout<<"match cost time: "<<timer.elapsed() <<endl; 
+  
+}
+
 
 void MONOVisualOdometry::poseEstimationPnP()
 {
@@ -275,7 +354,21 @@ void MONOVisualOdometry::addKeyFrame()
   }
   map_->insertKeyFrame(curr_);
   ref_=curr_;
+  
 }
+void MONOVisualOdometry::addFirstFrame()
+{
+  ref_=curr_;
+  keypoints_ref_.assign(keypoints_curr_.begin(),keypoints_curr_.end());
+  descriptors_ref_=descriptors_curr_;
+  
+}
+void MONOVisualOdometry::updateFirstFrame()
+{
+  
+  
+}
+
 void MONOVisualOdometry::addMapPoints()
 {
 //add the new map points into map_
@@ -348,12 +441,9 @@ double MONOVisualOdometry::getViewAngle ( Frame::Ptr frame, MapPoint::Ptr point 
     return acos( n.transpose()*point->norm_ );
 }
 //增加一部分单目的
-void MONOVisualOdometry::pose_estimation_2d2d (
-    const std::vector<KeyPoint>& keypoints_1,
-    const std::vector<KeyPoint>& keypoints_2,
-    const std::vector< DMatch >& matches,
-    Mat& R, Mat& t )
+void MONOVisualOdometry::pose_estimation_2d2d ( )
 {
+  Mat R, t;
     // 相机内参,TUM Freiburg2
 //     Mat K = ( Mat_<double> ( 3,3 ) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1 );
     Mat K = ( cv::Mat_<double> ( 3,3 ) <<
@@ -362,26 +452,29 @@ void MONOVisualOdometry::pose_estimation_2d2d (
               0,0,1
             );
     //-- 把匹配点转换为vector<Point2f>的形式
-    vector<Point2f> points1;
-    vector<Point2f> points2;
+    vector<cv::Point2f> points1;
+    vector<cv::Point2f> points2;
 
-    for ( int i = 0; i < ( int ) matches.size(); i++ )
+    
+    for ( int index:match_2dkp_index_ )
     {
-        points1.push_back ( keypoints_1[matches[i].queryIdx].pt );
-        points2.push_back ( keypoints_2[matches[i].trainIdx].pt );
+        points1.push_back ( keypoints_curr_[index.queryIdx].pt );
     }
-
+    for ( MapPoint::Ptr pt:match_3dpts_ )
+    {
+        points2.push_back(cv::Point2f( pt->getPositionCV()(0), pt->getPositionCV()(1)));
+    }
 //     //-- 计算基础矩阵
 //     Mat fundamental_matrix;
 //     fundamental_matrix = findFundamentalMat ( points1, points2, CV_FM_8POINT );
 //     cout<<"fundamental_matrix is "<<endl<< fundamental_matrix<<endl;
 
     //-- 计算本质矩阵
-    Point2d principal_point ( ref_->camera_->cx_, ref_->camera_->cy_ );				//相机主点, TUM dataset标定值
+    cv::Point2d principal_point ( ref_->camera_->cx_, ref_->camera_->cy_ );				//相机主点, TUM dataset标定值
     int focal_length = 521;						//相机焦距, TUM dataset标定值
     Mat essential_matrix;
     essential_matrix = cv::findEssentialMat ( points1, points2, focal_length, principal_point );
-    cout<<"essential_matrix is "<<endl<< essential_matrix<<endl;
+//     cout<<"essential_matrix is "<<endl<< essential_matrix<<endl;
 
     //-- 计算单应矩阵
 //     Mat homography_matrix;
@@ -396,12 +489,13 @@ void MONOVisualOdometry::pose_estimation_2d2d (
                            SO3 ( R ),
                            Vector3d ( t.at<double> ( 0,0 ), t.at<double> ( 1,0 ), t.at<double> ( 2,0 ) )
                        );    
-    
+      cout<<"T_c_w_estimated_: "<<endl<<T_c_w_estimated_.matrix()<<endl;
+  triangulation(R,t);
 }
 
 
 
-void MONOVisualOdometry::triangulation(const std::vector< std::allocator >& keypoint_1, const std::vector< std::allocator >& keypoint_2, const std::vector< std::allocator >& matches, const Mat& R, const Mat& t, std::vector< std::allocator >& points)
+void MONOVisualOdometry::triangulation(const Mat& R, const Mat& t)
 {
     Mat T1 = (cv::Mat_<float> (3,4) <<
         1,0,0,0,
@@ -419,12 +513,21 @@ void MONOVisualOdometry::triangulation(const std::vector< std::allocator >& keyp
               0, ref_->camera_->fy_, ref_->camera_->cy_,
               0,0,1
             );
-    vector<Point2f> pts_1, pts_2;
-    for ( DMatch m:matches )
+    vector<cv::Point2f> pts_1, pts_2;
+//     for ( DMatch m:matches )
+//     {
+//         // 将像素坐标转换至相机坐标
+//         pts_1.push_back (  ref_->camera_->pixel2camera( keypoint_1[m.queryIdx].pt, K) );
+//         pts_2.push_back ( ref_->camera_->pixel2camera( keypoint_2[m.trainIdx].pt, K) );
+//     }
+    
+    for ( int index:match_2dkp_index_ )
     {
-        // 将像素坐标转换至相机坐标
-        pts_1.push_back (  ref_->camera_->pixel2camera( keypoint_1[m.queryIdx].pt, K) );
-        pts_2.push_back ( ref_->camera_->pixel2camera( keypoint_2[m.trainIdx].pt, K) );
+        pts_1.push_back (pixel2camera( keypoints_curr_[index].pt,K) );
+    }
+    for ( MapPoint::Ptr pt:match_3dpts_ )
+    {
+        pts_2.push_back( pixel2camera(cv::Point2f( pt->getPositionCV()(0), pt->getPositionCV()(1)),K ));
     }
     
     Mat pts_4d;

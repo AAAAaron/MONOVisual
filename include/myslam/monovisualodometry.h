@@ -38,13 +38,15 @@ class MONOVisualOdometry
     
     VOState     state_;     // current VO status
     Map::Ptr    map_;       // map with all frames and map points
-    
+    vector<cv::Point3d> points;
     Frame::Ptr  ref_;       // reference key-frame 
     Frame::Ptr  curr_;      // current frame 
     
     cv::Ptr<cv::ORB> orb_;  // orb detector and computer 
     vector<cv::KeyPoint>    keypoints_curr_;    // keypoints in current frame
     Mat                     descriptors_curr_;  // descriptor in current frame 
+    vector<cv::KeyPoint>    keypoints_ref_;    // keypoints in current frame
+    Mat                     descriptors_ref_;  // descriptor in current frame 
     
     cv::FlannBasedMatcher   matcher_flann_;     // flann matcher
     vector<MapPoint::Ptr>   match_3dpts_;       // matched 3d points 
@@ -83,7 +85,9 @@ protected:
     void addMapPoints();
     bool checkEstimatedPose(); 
     bool checkKeyFrame();
-    
+    void addFirstFrame()  ;  
+    void updateFirstFrame();
+    void featureMatchingInit();
     void pose_estimation_2d2d (
     const std::vector<KeyPoint>& keypoints_1,
     const std::vector<KeyPoint>& keypoints_2,
@@ -99,6 +103,13 @@ protected:
     
     double getViewAngle( Frame::Ptr frame, MapPoint::Ptr point );  
 };
-
+cv::Point2f pixel2cam ( const Point2d& p, const Mat& K )
+{
+    return cv::Point2f
+    (
+        ( p.x - K.at<double>(0,2) ) / K.at<double>(0,0), 
+        ( p.y - K.at<double>(1,2) ) / K.at<double>(1,1) 
+    );
+}
 }
 #endif // MONOVISUALODOMETRY_H
