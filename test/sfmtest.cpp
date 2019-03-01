@@ -1,10 +1,21 @@
 // -------------- test the visual odometry -------------
+#ifndef SFMTEST_INCLUDE_H
+#define SFMTEST_INCLUDE_H
 #include <fstream>
+#include <Eigen/Dense>
+// #include "myslam/common_include.h"
 #include <boost/timer.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/viz.hpp>
+#include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+
+#include <opencv2/opencv.hpp>
+#include <opencv2/core/eigen.hpp>
+
+#include <map>
+#include <opencv2/video/tracking.hpp>
 
 #include "myslam/config.h"
 #include "myslam/visual_odometry.h"
@@ -16,33 +27,100 @@ struct SFMFeature
 {
     bool state;
     int id;
-    vector<pair<int, Vector2d>> observation;
+    vector<pair<int, Vector2d>> observation;//这个就可以表示在每帧听到的位置
     double position[3];
     double depth;
 };
+struct FrameInfo
+{
+  int id;
+  Mat img;
+  vector<KeyPoint> frameKeypoints;
+  Mat FrameDescriptors;
+  vector<Point3d> depth;
+};
 
-void find_feature_matches(
-    const Mat &img_1, const Mat &img_2,
-    std::vector<KeyPoint> &keypoints_1,
-    std::vector<KeyPoint> &keypoints_2,
-    std::vector<DMatch> &matches);
+template <class T> void reduceVector(vector<T> &v, vector<uchar> status)
+{
+    int j = 0;
+    for (int i = 0; i < int(v.size()); i++)
+        if (status[i])
+            v[j++] = v[i];
+    v.resize(j);
+}
+void triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matrix<double, 3, 4> &Pose1,
+						Vector2d &point0, Vector2d &point1, Vector3d &point_3d);
+//找到两帧之间的共视点
+void triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Pose0, 
+									 int frame1, Eigen::Matrix<double, 3, 4> &Pose1,
+									 vector<SFMFeature> &sfm_f);
+bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l,int WINDOW_SIZE,vector<SFMFeature> &sfm_f);
 
-void pose_estimation_2d2d(
-    const std::vector<KeyPoint> &keypoints_1,
-    const std::vector<KeyPoint> &keypoints_2,
-    const std::vector<DMatch> &matches,
-    Mat &R, Mat &t);
+vector<pair<Vector3d, Vector3d>> getCorresponding(int frame_count_l, int frame_count_r,vector<SFMFeature> &sfm_f);
+//5帧法恢复rt，是从前面找到的特征点
+bool solveRelativeRT(const vector<pair<Vector3d, Vector3d>> &corres, Matrix3d &Rotation, Vector3d &Translation)
+{
+    if (corres.size() >= 15)
+    {
+      int ptCount = (int)corres.size();
+      Mat p1(ptCount, 2, CV_32F);
+      Mat p2(ptCount, 2, CV_32F);
 
-void triangulation(
-    const vector<KeyPoint> &keypoint_1,
-    const vector<KeyPoint> &keypoint_2,
-    const std::vector<DMatch> &matches,
-    const Mat &R, const Mat &t,
-    vector<Point3d> &points);
+      
+
+      // 把Keypoint转换为Mat
+      for (int i=0; i<ptCount; i++)
+      {
+
+	  p1.at<float>(i, 0) = corres[i].first(0);
+	  p1.at<float>(i, 1) = corres[i].first(1);
+
+	  p2.at<float>(i, 0) = corres[i].second(0);
+	  p2.at<float>(i, 1) = corres[i].second(1);
+// 	  cout<<p1.at<float>(i, 0)<<"----"<<p1.at<float>(i, 1)<<endl;
+// 	  cout<<p2.at<float>(i, 0)<<"----"<<p2.at<float>(i, 1)<<endl;	  
+      }      
+
+        cv::Mat mask;
+
+        //找基础质矩阵
+        cv::Mat E = cv::findFundamentalMat(p1, p2, cv::FM_RANSAC, 3., 0.99, mask);
+
+        cv::Mat cameraMatrix =  ( Mat_<double> ( 3,3 ) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1 );
+
+        cv::Mat rot, trans;
+        //判断相位符合的点
+
+        int inlier_cnt = cv::recoverPose(E, p1, p2, cameraMatrix, rot, trans, mask);
+        cout << "inlier_cnt " << inlier_cnt << endl;
+
+        Eigen::Matrix3d R;
+        Eigen::Vector3d T;
+        for (int i = 0; i < 3; i++)
+        {   
+            T(i) = trans.at<double>(i, 0);
+            for (int j = 0; j < 3; j++)
+                R(i, j) = rot.at<double>(i, j);
+        }
+
+        Rotation = R.transpose();
+        Translation = -R.transpose() * T;
+        if(inlier_cnt > 12)//如果点合符要求，就返回
+            return true;
+        else
+            return false;
+    }
+    return false;
+}
+
 // 像素坐标转相机归一化坐标
 Point2f pixel2cam(const Point2d &p, const Mat &K);
 
-int main ( int argc, char** argv )
+bool solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,vector<SFMFeature> &sfm_f);
+
+
+int WINDOWSIZE=10;
+int main(int argc, char **argv)
 {
     // if ( argc != 2 )
     // {
@@ -55,7 +133,8 @@ int main ( int argc, char** argv )
 
     string dataset_dir = myslam::Config::get<string> ( "dataset_dir" );
     cout<<"dataset: "<<dataset_dir<<endl;
-    ifstream fin ( dataset_dir+"/associate.txt" );
+    ifstream fin(dataset_dir + "/associate.txt");
+
     if ( !fin )
     {
         cout<<"please generate the associate file called associate.txt!"<<endl;
@@ -79,250 +158,327 @@ int main ( int argc, char** argv )
 
 
 
-    // // visualization
-    // cv::viz::Viz3d vis ( "Visual Odometry" );
-    // cv::viz::WCoordinateSystem world_coor ( 1.0 ), camera_coor ( 0.5 );
-    // cv::Point3d cam_pos ( 0, -1.0, -1.0 ), cam_focal_point ( 0,0,0 ), cam_y_dir ( 0,1,0 );
-    // cv::Affine3d cam_pose = cv::viz::makeCameraPose ( cam_pos, cam_focal_point, cam_y_dir );
-    // vis.setViewerPose ( cam_pose );
+    // visualization
+    cv::viz::Viz3d vis ( "Visual Odometry" );
+    cv::viz::WCoordinateSystem world_coor ( 1.0 ), camera_coor ( 0.5 );
+    cv::Point3d cam_pos ( 0, -1.0, -1.0 ), cam_focal_point ( 0,0,0 ), cam_y_dir ( 0,1,0 );
+    cv::Affine3d cam_pose = cv::viz::makeCameraPose ( cam_pos, cam_focal_point, cam_y_dir );
+    vis.setViewerPose ( cam_pose );
 
-    // world_coor.setRenderingProperty ( cv::viz::LINE_WIDTH, 2.0 );
-    // camera_coor.setRenderingProperty ( cv::viz::LINE_WIDTH, 1.0 );
-    // vis.showWidget ( "World", world_coor );
-    // vis.showWidget ( "Camera", camera_coor );
+    world_coor.setRenderingProperty ( cv::viz::LINE_WIDTH, 2.0 );
+    camera_coor.setRenderingProperty ( cv::viz::LINE_WIDTH, 1.0 );
+    vis.showWidget ( "World", world_coor );
+    vis.showWidget ( "Camera", camera_coor );
 
-    // cout<<"read total "<<rgb_files.size() <<" entries"<<endl;
+    cout<<"read total "<<rgb_files.size() <<" entries"<<endl;
 
-    int WINDOWSIZE=10;
-    Quaterniond Q[WINDOWSIZE + 1];
+
     Vector3d T[WINDOWSIZE + 1];
     map<int, Vector3d> sfm_tracked_points;
-    vector<SFMFeature> sfm_f; //共视点的集合
+
     
+    vector< cv::Point2f > keypoints;      // 因为要删除跟踪失败的点，使用list
+    vector< SFMFeature > sfm_f;
+    cv::Mat color, depth, last_color;
+   
+    for(int index=0;index<WINDOWSIZE;index++)
+    {
+        color = imread(rgb_files[index], CV_LOAD_IMAGE_COLOR);
+	cout<<"read..."<<endl;
+        if (index == 0 )
+        {
+            // 对第一帧提取FAST特征点
+            vector<cv::KeyPoint> kps;
+            cv::Ptr<cv::FastFeatureDetector> detector = cv::FastFeatureDetector::create();
+            detector->detect( color, kps );
+	    int first_count=0;
+            for ( auto kp:kps )
+	    {
+                keypoints.push_back( kp.pt );
+		SFMFeature tmpsfm;
+		tmpsfm.state=false;
+		tmpsfm.id=first_count;
+		tmpsfm.observation.push_back(make_pair(index, Eigen::Vector2d{kp.pt.x, kp.pt.y}));
+		first_count++;
+		sfm_f.push_back(tmpsfm);
+	    }
+            last_color = color;
+            continue;
+        }
+        if ( color.data==nullptr)
+            continue;
+        // 对其他帧用LK跟踪特征点
+        vector<cv::Point2f> next_keypoints; 
+        vector<cv::Point2f> prev_keypoints;
+        for ( auto kp:keypoints )
+            prev_keypoints.push_back(kp);
+
+        vector<unsigned char> status;
+        vector<float> error; 
+//         chrono::steady_clock::time_point t1 = chrono::steady_clock::now();
+        cv::calcOpticalFlowPyrLK( last_color, color, prev_keypoints, next_keypoints, status, error );
+//         chrono::steady_clock::time_point t2 = chrono::steady_clock::now();
+//         chrono::duration<double> time_used = chrono::duration_cast<chrono::duration<double>>( t2-t1 );
+//         cout<<"LK Flow use time："<<time_used.count()<<" seconds."<<endl;
+        // 把跟丢的点删掉
+
+	int keypoint_index=0;
+        for ( auto kp:next_keypoints )
+	{
+	  sfm_f[keypoint_index].observation.push_back(make_pair(index, Eigen::Vector2d{kp.x, kp.y}));
+	  keypoint_index++;
+	}
+        reduceVector(keypoints,status);
+	reduceVector(sfm_f,status);
+        cout<<"tracked keypoints: "<<keypoints.size()<<endl;
+        if (keypoints.size() == 0)
+        {
+            cout<<"all keypoints are lost."<<endl;
+            break; 
+        }
+        // 画出 keypoints
+//         cv::Mat img_show = color.clone();
+//         for ( auto kp:keypoints )
+//             cv::circle(img_show, kp, 10, cv::Scalar(0, 240, 0), 1);
+//         cv::imshow("corners", img_show);
+//         cv::waitKey(0);
+        last_color = color;
+	
+    }        
 
 
-    Mat img_1 = imread(rgb_files[0], CV_LOAD_IMAGE_COLOR);
-    Mat img_2 = imread(rgb_files[WINDOWSIZE-1], CV_LOAD_IMAGE_COLOR);
-    vector<KeyPoint> keypoints_1, keypoints_2;
-    vector<DMatch> matches;
 
-    vector<Point3d> pointsfirst_last;
-    find_feature_matches(img_1, img_2, keypoints_1, keypoints_2, matches);
-    cout << "一共找到了" << matches.size() << "组匹配点" << endl;
-    //-- 估计两张图像间运动
-    Mat relative_R, relative_t;
-    pose_estimation_2d2d(keypoints_1, keypoints_2, matches, relative_R, relative_t);
-    triangulation(keypoints_1,keypoints_2,matches,relative_R,relative_t,pointsfirst_last);
-
-
-    // int feature_num = WINDOWSIZE;
+    int frame_num = WINDOWSIZE;
     // //cout << "set 0 and " << l << " as known " << endl;
     // // have relative_r relative_t
     // // intial two view
     // //确定最后一帧的相对值
     // //设置初始值，ql是确定的帧的，t【-1】当然是给出计算的那个部分，以l帧作为起点0
-    // int l=0;
-    // Eigen::Quaterniond q[feature_num];
-    // q[l].w() = 1;
-    // q[l].x() = 0;
-    // q[l].y() = 0;
-    // q[l].z() = 0;
-    // T[l].setZero();
-    // q[frame_num - 1] = q[l] * Quaterniond(relative_R);
-    // T[frame_num - 1] = relative_T;
+    int l=0;
+    Eigen::Quaterniond q[frame_num];
+    q[l].w() = 1;
+    q[l].x() = 0;
+    q[l].y() = 0;
+    q[l].z() = 0;
+    T[l].setZero();
+    Matrix3d relative_R;
+    Vector3d relative_T;
+
+    if (!relativePose(relative_R, relative_T, l,WINDOWSIZE,sfm_f))
+    {
+        printf("Not enough features or parallax; Move device around");
+        return false;
+    }    
+
+    q[frame_num - 1] = q[l] * Quaterniond(relative_R);
+    T[frame_num - 1] = relative_T;
     // //cout << "init q_l " << q[l].w() << " " << q[l].vec().transpose() << endl;
     // //cout << "init t_l " << T[l].transpose() << endl;
 
     // //rotate to cam frame
     // //为啥要定义两个部分的RT
-    // Matrix3d c_Rotation[frame_num];
-    // Vector3d c_Translation[frame_num];
-    // Quaterniond c_Quat[frame_num];
+    Matrix3d c_Rotation[frame_num];
+    Vector3d c_Translation[frame_num];
+    Quaterniond c_Quat[frame_num];
     // double c_rotation[frame_num][4];
     // double c_translation[frame_num][3];
-    // Eigen::Matrix<double, 3, 4> Pose[frame_num]; //位姿用于三角化
+    Eigen::Matrix<double, 3, 4> Pose[frame_num]; //位姿用于三角化
+//第一帧的值
+    c_Quat[l] = q[l].inverse();//旋转是什么意思？？？
+    c_Rotation[l] = c_Quat[l].toRotationMatrix(); //最后一帧当然是算出来的那个
+    c_Translation[l] = -1 * (c_Rotation[l] * T[l]);//意思是以最后一帧载体系处理吗
+    Pose[l].block<3, 3>(0, 0) = c_Rotation[l];
+    Pose[l].block<3, 1>(0, 3) = c_Translation[l];
+//最后一帧的值
+    c_Quat[frame_num - 1] = q[frame_num - 1].inverse();
+    c_Rotation[frame_num - 1] = c_Quat[frame_num - 1].toRotationMatrix();
+    c_Translation[frame_num - 1] = -1 * (c_Rotation[frame_num - 1] * T[frame_num - 1]);
+    Pose[frame_num - 1].block<3, 3>(0, 0) = c_Rotation[frame_num - 1];
+    Pose[frame_num - 1].block<3, 1>(0, 3) = c_Translation[frame_num - 1];
 
-    // c_Quat[l] = q[l].inverse();
-    // c_Rotation[l] = c_Quat[l].toRotationMatrix(); //最后一帧当然是算出来的那个
-    // c_Translation[l] = -1 * (c_Rotation[l] * T[l]);
-    // Pose[l].block<3, 3>(0, 0) = c_Rotation[l];
-    // Pose[l].block<3, 1>(0, 3) = c_Translation[l];
-
-    // c_Quat[frame_num - 1] = q[frame_num - 1].inverse();
-    // c_Rotation[frame_num - 1] = c_Quat[frame_num - 1].toRotationMatrix();
-    // c_Translation[frame_num - 1] = -1 * (c_Rotation[frame_num - 1] * T[frame_num - 1]);
-    // Pose[frame_num - 1].block<3, 3>(0, 0) = c_Rotation[frame_num - 1];
-    // Pose[frame_num - 1].block<3, 1>(0, 3) = c_Translation[frame_num - 1];
-
-    // for (int i = 0; i < WINDOWSIZE-1; i++)
-    // {
-    //     // cout<<"****** loop "<<i<<" ******"<<rgb_files[i] <<endl;
-    //     // Mat color = cv::imread ( rgb_files[i] );
-    //     // solve pnp跳过前面那些不用的帧
-    //     if (i > l)
-    //     {
-    //         //就是用上一帧的作为初值去求解pnp
-    //         Matrix3d R_initial = c_Rotation[i - 1];
-    //         Vector3d P_initial = c_Translation[i - 1];
-    //         if (!solveFrameByPnP(R_initial, P_initial, i, sfm_f))
-    //             return false;
-    //         c_Rotation[i] = R_initial;
-    //         c_Translation[i] = P_initial;
-    //         c_Quat[i] = c_Rotation[i];
-    //         Pose[i].block<3, 3>(0, 0) = c_Rotation[i];
-    //         Pose[i].block<3, 1>(0, 3) = c_Translation[i];
-    //     }
+    for (int i = l; i < WINDOWSIZE-1; i++)
+    {
+        // cout<<"****** loop "<<i<<" ******"<<rgb_files[i] <<endl;
+        // Mat color = cv::imread ( rgb_files[i] );
+        // solve pnp跳过前面那些不用的帧
+	if (i > l)
+        {
+            //就是用上一帧的作为初值去求解pnp
+            Matrix3d R_initial = c_Rotation[i - 1];
+            Vector3d P_initial = c_Translation[i - 1];
+            if (!solveFrameByPnP(R_initial, P_initial, i, sfm_f))
+                return false;
+            c_Rotation[i] = R_initial;
+            c_Translation[i] = P_initial;
+            c_Quat[i] = c_Rotation[i];
+            Pose[i].block<3, 3>(0, 0) = c_Rotation[i];
+            Pose[i].block<3, 1>(0, 3) = c_Translation[i];
+        }
 
     //     // triangulate point based on the solve pnp result
     //     //前面条件不满足，就是首先进来当i=l时第i帧和最后一帧之间的三角化，得到了这两帧之间的共视点
     //     //然后重复进行从i+1帧到最后一帧之间的三角化，sfm里对应的部分的位姿
     //     //经过这一步，可以在一开始定义的那些在l和最后一帧之间的共视点上加上深度
-    //     triangulateTwoFrames(i, Pose[i], frame_num - 1, Pose[frame_num - 1], sfm_f);
-    // }
-    // for (int i = l + 1; i < frame_num - 1; i++)
-    //     triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
+        triangulateTwoFrames(i, Pose[i], frame_num - 1, Pose[frame_num - 1], sfm_f);
+      
+    }	
+    for (int i = l + 1; i < frame_num - 1; i++)
+    {  triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
+    }
+    
+    for(int i=0;i<frame_num;i++)
+    {
+      
+    //visual
+      cout<<to_string(i)<<endl;
+      cout<<Pose[i]<<endl;
+    cv::Affine3d M (
+            cv::Affine3d::Mat3 (
+                Pose[i] ( 0,0 ), Pose[i]  ( 0,1 ),Pose[i]  ( 0,2 ),
+                Pose[i]  ( 1,0 ), Pose[i]  ( 1,1 ), Pose[i]  ( 1,2 ),
+                Pose[i]  ( 2,0 ), Pose[i]  ( 2,1 ), Pose[i]  ( 2,2 )
+            ),
+            cv::Affine3d::Vec3 (
+                Pose[i]  ( 0,3 ), Pose[i]  ( 1,3 ), Pose[i]  ( 2,3 )
+            )
+        );
+    
+        cv::Mat img_show = imread(rgb_files[i], CV_LOAD_IMAGE_COLOR);
+	vector<KeyPoint> kp;
+        for ( auto sfm:sfm_f ){
+	  for(unsigned sfmindex=0;sfmindex<sfm.observation.size();sfmindex++){
+	    if (sfm.observation[sfmindex].first==i){
+            cv::circle(img_show, Point(sfm.observation[sfmindex].second(0),sfm.observation[sfmindex].second(1)), 10, cv::Scalar(0, 240, 0), 1);
+	    }
+	  }
+	}
+        cv::imshow("corners", img_show);     
+    cv::imshow ( "image", img_show );
+     
+     cv::waitKey ( 0);
+     vis.setWidgetPose ( "Camera", M );
+     vis.spinOnce ( 10, false );
+        cout<<endl;
+    }
+
     return 0;
 }
-
-
-void find_feature_matches(const Mat &img_1, const Mat &img_2,
-                          std::vector<KeyPoint> &keypoints_1,
-                          std::vector<KeyPoint> &keypoints_2,
-                          std::vector<DMatch> &matches)
+void triangulatePoint(Eigen::Matrix<double, 3, 4> &Pose0, Eigen::Matrix<double, 3, 4> &Pose1,
+						Vector2d &point0, Vector2d &point1, Vector3d &point_3d)
 {
-    //-- 初始化
-    Mat descriptors_1, descriptors_2;
-    // used in OpenCV3
-    Ptr<FeatureDetector> detector = ORB::create();
-    Ptr<DescriptorExtractor> descriptor = ORB::create();
-    // use this if you are in OpenCV2
-    // Ptr<FeatureDetector> detector = FeatureDetector::create ( "ORB" );
-    // Ptr<DescriptorExtractor> descriptor = DescriptorExtractor::create ( "ORB" );
-    Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce-Hamming");
-    //-- 第一步:检测 Oriented FAST 角点位置
-    detector->detect(img_1, keypoints_1);
-    detector->detect(img_2, keypoints_2);
-
-    //-- 第二步:根据角点位置计算 BRIEF 描述子
-    descriptor->compute(img_1, keypoints_1, descriptors_1);
-    descriptor->compute(img_2, keypoints_2, descriptors_2);
-
-    //-- 第三步:对两幅图像中的BRIEF描述子进行匹配，使用 Hamming 距离
-    vector<DMatch> match;
-    // BFMatcher matcher ( NORM_HAMMING );
-    matcher->match(descriptors_1, descriptors_2, match);
-
-    //-- 第四步:匹配点对筛选
-    double min_dist = 10000, max_dist = 0;
-
-    //找出所有匹配之间的最小距离和最大距离, 即是最相似的和最不相似的两组点之间的距离
-    for (int i = 0; i < descriptors_1.rows; i++)
-    {
-        double dist = match[i].distance;
-        if (dist < min_dist)
-            min_dist = dist;
-        if (dist > max_dist)
-            max_dist = dist;
-    }
-
-    printf("-- Max dist : %f \n", max_dist);
-    printf("-- Min dist : %f \n", min_dist);
-
-    //当描述子之间的距离大于两倍的最小距离时,即认为匹配有误.但有时候最小距离会非常小,设置一个经验值30作为下限.
-    for (int i = 0; i < descriptors_1.rows; i++)
-    {
-        if (match[i].distance <= max(2 * min_dist, 30.0))
-        {
-            matches.push_back(match[i]);
-        }
-    }
+	Matrix4d design_matrix = Matrix4d::Zero();
+	design_matrix.row(0) = point0[0] * Pose0.row(2) - Pose0.row(0);
+	design_matrix.row(1) = point0[1] * Pose0.row(2) - Pose0.row(1);
+	design_matrix.row(2) = point1[0] * Pose1.row(2) - Pose1.row(0);
+	design_matrix.row(3) = point1[1] * Pose1.row(2) - Pose1.row(1);
+	Vector4d triangulated_point;
+	triangulated_point =
+		      design_matrix.jacobiSvd(Eigen::ComputeFullV).matrixV().rightCols<1>();
+	point_3d(0) = triangulated_point(0) / triangulated_point(3);
+	point_3d(1) = triangulated_point(1) / triangulated_point(3);
+	point_3d(2) = triangulated_point(2) / triangulated_point(3);
+}
+//找到两帧之间的共视点
+void triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Pose0, 
+									 int frame1, Eigen::Matrix<double, 3, 4> &Pose1,
+									 vector<SFMFeature> &sfm_f)
+{
+	assert(frame0 != frame1);
+	for (int j = 0; j < sfm_f.size(); j++)
+	{
+		if (sfm_f[j].state == true)
+			continue;
+		bool has_0 = false, has_1 = false;
+		Vector2d point0;
+		Vector2d point1;
+		for (int k = 0; k < (int)sfm_f[j].observation.size(); k++)
+		{
+			if (sfm_f[j].observation[k].first == frame0)
+			{
+				point0 = sfm_f[j].observation[k].second;
+				has_0 = true;
+			}
+			if (sfm_f[j].observation[k].first == frame1)
+			{
+				point1 = sfm_f[j].observation[k].second;
+				has_1 = true;
+			}
+		}
+		//在所有的点中，这两帧之间存在共视点
+		if (has_0 && has_1)
+		{
+			Vector3d point_3d;
+			triangulatePoint(Pose0, Pose1, point0, point1, point_3d);
+			sfm_f[j].state = true;
+			sfm_f[j].position[0] = point_3d(0);
+			sfm_f[j].position[1] = point_3d(1);
+			sfm_f[j].position[2] = point_3d(2);
+			//cout << "trangulated : " << frame1 << "  3d point : "  << j << "  " << point_3d.transpose() << endl;
+		}							  
+	}
 }
 
-void pose_estimation_2d2d(
-    const std::vector<KeyPoint> &keypoints_1,
-    const std::vector<KeyPoint> &keypoints_2,
-    const std::vector<DMatch> &matches,
-    Mat &R, Mat &t)
+bool solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,vector<SFMFeature> &sfm_f)
 {
-    // 相机内参,TUM Freiburg2
-    Mat K = (Mat_<double>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
+	vector<cv::Point2f> pts_2_vector;
+	vector<cv::Point3f> pts_3_vector;
+	for (int j = 0; j < sfm_f.size(); j++)
+	{
+		if (sfm_f[j].state != true)
+			continue;
+		Vector2d point2d;
+		for (int k = 0; k < (int)sfm_f[j].observation.size(); k++)
+		{
+			if (sfm_f[j].observation[k].first == i)
+			{
+				Vector2d img_pts = sfm_f[j].observation[k].second;
+				cv::Point2f pts_2(img_pts(0), img_pts(1));
+				pts_2_vector.push_back(pts_2);
+				cv::Point3f pts_3(sfm_f[j].position[0], sfm_f[j].position[1], sfm_f[j].position[2]);
+				pts_3_vector.push_back(pts_3);
+				break;
+			}
+		}
+	}
+	if (int(pts_2_vector.size()) < 15)
+	{
+		printf("unstable features tracking, please slowly move you device!\n");
+		if (int(pts_2_vector.size()) < 10)
+			return false;
+	}
+	cv::Mat r, rvec, t, D, tmp_r;
+	cv::eigen2cv(R_initial, tmp_r);
 
-    //-- 把匹配点转换为vector<Point2f>的形式
-    vector<Point2f> points1;
-    vector<Point2f> points2;
 
-    for (int i = 0; i < (int)matches.size(); i++)
-    {
-        points1.push_back(keypoints_1[matches[i].queryIdx].pt);
-        points2.push_back(keypoints_2[matches[i].trainIdx].pt);
-    }
+// int  cvRodrigues2cvRodr ( const CvMat* src, CvMat* dst, CvMat* jacobian=0 );
+//      src为输入的旋转向量（3x1或者1x3）或者旋转矩阵（3x3）。
+//      dst为输出的旋转矩阵（3x3）或者旋转向量（3x1或者1x3）。
+//      jacobian为可选的输出雅可比矩阵（3x9或者9x3），是输入与输出数组的偏导数。
 
-    //-- 计算基础矩阵
-    Mat fundamental_matrix;
-    fundamental_matrix = findFundamentalMat(points1, points2, CV_FM_8POINT);
-    cout << "fundamental_matrix is " << endl
-         << fundamental_matrix << endl;
 
-    //-- 计算本质矩阵
-    Point2d principal_point(325.1, 249.7); //相机主点, TUM dataset标定值
-    int focal_length = 521;                //相机焦距, TUM dataset标定值
-    Mat essential_matrix;
-    essential_matrix = findEssentialMat(points1, points2, focal_length, principal_point);
-    cout << "essential_matrix is " << endl
-         << essential_matrix << endl;
 
-    //-- 计算单应矩阵
-    Mat homography_matrix;
-    homography_matrix = findHomography(points1, points2, RANSAC, 3);
-    cout << "homography_matrix is " << endl
-         << homography_matrix << endl;
+	cv::Rodrigues(tmp_r, rvec);
+	cv::eigen2cv(P_initial, t);
+	cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
+	bool pnp_succ;
+	//K在这里内参默认是I都可以吗？？
+	pnp_succ = cv::solvePnP(pts_3_vector, pts_2_vector, K, D, rvec, t, 1);
+	if(!pnp_succ)
+	{
+		return false;
+	}
+	cv::Rodrigues(rvec, r);
+	//cout << "r " << endl << r << endl;
+	MatrixXd R_pnp;
+	cv::cv2eigen(r, R_pnp);
+	MatrixXd T_pnp;
+	cv::cv2eigen(t, T_pnp);
+	R_initial = R_pnp;
+	P_initial = T_pnp;
+	return true;
 
-    //-- 从本质矩阵中恢复旋转和平移信息.
-    recoverPose(essential_matrix, points1, points2, R, t, focal_length, principal_point);
-    cout << "R is " << endl
-         << R << endl;
-    cout << "t is " << endl
-         << t << endl;
 }
 
-void triangulation(
-    const vector<KeyPoint> &keypoint_1,
-    const vector<KeyPoint> &keypoint_2,
-    const std::vector<DMatch> &matches,
-    const Mat &R, const Mat &t,
-    vector<Point3d> &points)
-{
-    Mat T1 = (Mat_<float>(3, 4) << 1, 0, 0, 0,
-              0, 1, 0, 0,
-              0, 0, 1, 0);
-    Mat T2 = (Mat_<float>(3, 4) << R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2), t.at<double>(0, 0),
-              R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), t.at<double>(1, 0),
-              R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2), t.at<double>(2, 0));
-
-    Mat K = (Mat_<double>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
-    vector<Point2f> pts_1, pts_2;
-    for (DMatch m : matches)
-    {
-        // 将像素坐标转换至相机坐标
-        pts_1.push_back(pixel2cam(keypoint_1[m.queryIdx].pt, K));
-        pts_2.push_back(pixel2cam(keypoint_2[m.trainIdx].pt, K));
-    }
-
-    Mat pts_4d;
-    cv::triangulatePoints(T1, T2, pts_1, pts_2, pts_4d);
-
-    // 转换成非齐次坐标
-    for (int i = 0; i < pts_4d.cols; i++)
-    {
-        Mat x = pts_4d.col(i);
-        x /= x.at<float>(3, 0); // 归一化
-        Point3d p(
-            x.at<float>(0, 0),
-            x.at<float>(1, 0),
-            x.at<float>(2, 0));
-        points.push_back(p);
-    }
-}
 
 Point2f pixel2cam(const Point2d &p, const Mat &K)
 {
@@ -330,3 +486,70 @@ Point2f pixel2cam(const Point2d &p, const Mat &K)
         (p.x - K.at<double>(0, 2)) / K.at<double>(0, 0),
         (p.y - K.at<double>(1, 2)) / K.at<double>(1, 1));
 }
+
+//获得corres焦点
+vector<pair<Vector3d, Vector3d>> getCorresponding(int frame_count_l, int frame_count_r,vector<SFMFeature> &sfm_f)
+{
+    vector<pair<Vector3d, Vector3d>> corres;
+    for (auto &it : sfm_f)
+    {
+
+            Vector3d a , b ;
+	    for(auto &frameId:it.observation)	    
+	    {
+	      if(frameId.first==frame_count_l)
+	      {
+		a=Vector3d( frameId.second(0),frameId.second(1),0);
+	      }
+	      if(frameId.first==frame_count_r)
+	      {
+		b=Vector3d( frameId.second(0),frameId.second(1),0);
+	      }
+	    }
+            
+            corres.push_back(make_pair(a, b));
+        
+    }
+    return corres;
+}
+
+bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l,int WINDOW_SIZE,vector<SFMFeature> &sfm_f)
+{
+    //corres考察视差
+    // find previous frame which contians enough correspondance and parallex with newest frame
+    for (int i = 0; i < WINDOW_SIZE; i++)
+    {
+        vector<pair<Vector3d, Vector3d>> corres;
+        corres = getCorresponding(i, WINDOW_SIZE-1,sfm_f);
+        //判断窗口内所有的帧和最后的帧之间的交点个数
+        //判断交点个数，要求大于20个
+	
+        if (corres.size() > 20)
+        {
+            double sum_parallax = 0;
+            double average_parallax;
+            for (int j = 0; j < int(corres.size()); j++)
+            {
+                Vector2d pts_0(corres[j].first(0), corres[j].first(1));
+                Vector2d pts_1(corres[j].second(0), corres[j].second(1));
+                double parallax = (pts_0 - pts_1).norm();
+                sum_parallax = sum_parallax + parallax;
+
+            }
+            average_parallax = 1.0 * sum_parallax / int(corres.size());
+            //满足特征点之间的平均距离要符合一个要求，然后使用5点法求解RT
+            //这里求出的是基于第i帧的位姿
+// 	    cout<<average_parallax<<endl;
+            if(average_parallax * 460 > 30 && solveRelativeRT(corres, relative_R, relative_T))
+            {
+	      cout<<corres.size()<<endl;
+                l = i;
+//                 ROS_DEBUG("average_parallax %f choose l %d and newest frame to triangulate the whole structure", average_parallax * 460, l);
+                return true;
+            }
+        }
+        	
+    }
+    return false;
+}
+#endif

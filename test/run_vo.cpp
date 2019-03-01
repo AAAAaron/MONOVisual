@@ -1,5 +1,7 @@
 // -------------- test the visual odometry -------------
 #include <fstream>
+#include <Eigen/Dense>
+#include <opencv2/core/eigen.hpp>
 #include <boost/timer.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -11,13 +13,14 @@
 
 int main ( int argc, char** argv )
 {
-    if ( argc != 2 )
-    {
-        cout<<"usage: run_vo parameter_file"<<endl;
-        return 1;
-    }
+//     if ( argc != 2 )
+//     {
+//         cout<<"usage: run_vo parameter_file"<<endl;
+//         return 1;
+//     }
 
-    myslam::Config::setParameterFile ( argv[1] );
+//     myslam::Config::setParameterFile ( argv[1] );
+    myslam::Config::setParameterFile ( "../config/default.yaml" );
     myslam::VisualOdometry::Ptr vo ( new myslam::VisualOdometry );
 
     string dataset_dir = myslam::Config::get<string> ( "dataset_dir" );
@@ -59,7 +62,7 @@ int main ( int argc, char** argv )
     vis.showWidget ( "Camera", camera_coor );
 
     cout<<"read total "<<rgb_files.size() <<" entries"<<endl;
-    for ( int i=0; i<rgb_files.size(); i++ )
+    for ( int i=0; i<10; i++ )
     {
         cout<<"****** loop "<<i<<" ******"<<endl;
         Mat color = cv::imread ( rgb_files[i] );
@@ -91,6 +94,7 @@ int main ( int argc, char** argv )
                 Twc.translation() ( 0,0 ), Twc.translation() ( 1,0 ), Twc.translation() ( 2,0 )
             )
         );
+	cout<<Twc<<endl;
 
 	//显示关键点的图
         Mat img_show = color.clone();
