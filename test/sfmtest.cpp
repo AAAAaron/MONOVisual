@@ -1,6 +1,8 @@
 // -------------- test the visual odometry -------------
 #ifndef SFMTEST_INCLUDE_H
 #define SFMTEST_INCLUDE_H
+#include <ceres/ceres.h>
+#include <ceres/rotation.h>
 #include <fstream>
 #include <Eigen/Dense>
 // #include "myslam/common_include.h"
@@ -39,7 +41,42 @@ struct FrameInfo
   Mat FrameDescriptors;
   vector<Point3d> depth;
 };
+// 像素坐标转相机归一化坐标
+Point2f pixel2cam(const Point2d &p, const Mat &K);
 
+struct ReprojectionError3D
+{
+    ReprojectionError3D(double observed_u, double observed_v)
+        : observed_u(observed_u), observed_v(observed_v)
+    {
+    }
+
+    template <typename T>
+    bool operator()(const T *const camera_R, const T *const camera_T, const T *point, T *residuals) const
+    {
+        T p[3];
+        ceres::QuaternionRotatePoint(camera_R, point, p);
+        p[0] += camera_T[0];
+        p[1] += camera_T[1];
+        p[2] += camera_T[2];
+        T xp = p[0] / p[2];
+        T yp = p[1] / p[2];
+        residuals[0] = xp - T(observed_u);
+        residuals[1] = yp - T(observed_v);
+        return true;
+    }
+
+    static ceres::CostFunction *Create(const double observed_x,
+                                       const double observed_y)
+    {
+        return (new ceres::AutoDiffCostFunction<
+                ReprojectionError3D, 2, 4, 3, 3>(
+            new ReprojectionError3D(observed_x, observed_y)));
+    }
+
+    double observed_u;
+    double observed_v;
+};
 template <class T> void reduceVector(vector<T> &v, vector<uchar> status)
 {
     int j = 0;
@@ -55,6 +92,21 @@ void triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Pose0,
 									 int frame1, Eigen::Matrix<double, 3, 4> &Pose1,
 									 vector<SFMFeature> &sfm_f);
 bool relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l,int WINDOW_SIZE,vector<SFMFeature> &sfm_f);
+
+void rejectWithF(vector<cv::Point2f> &forw_pts, vector<cv::Point2f> &cur_pts)
+{
+
+        vector<uchar> status;
+        //Calculates a fundamental matrix from the corresponding points in two images.
+        //根据两队点算F,以及status再次筛除一些点
+        cv::findFundamentalMat(forw_pts, cur_pts, cv::FM_RANSAC, 3.0, 0.99, status);
+        int size_a = cur_pts.size();
+        reduceVector(cur_pts, status);
+        reduceVector(forw_pts, status);
+        // ROS_DEBUG("FM ransac: %d -> %lu: %f", size_a, forw_pts.size(), 1.0 * forw_pts.size() / size_a);
+        // ROS_DEBUG("FM ransac costs: %fms", t_f.toc());
+    
+}
 
 vector<pair<Vector3d, Vector3d>> getCorresponding(int frame_count_l, int frame_count_r,vector<SFMFeature> &sfm_f);
 //5帧法恢复rt，是从前面找到的特征点
@@ -113,13 +165,12 @@ bool solveRelativeRT(const vector<pair<Vector3d, Vector3d>> &corres, Matrix3d &R
     return false;
 }
 
-// 像素坐标转相机归一化坐标
-Point2f pixel2cam(const Point2d &p, const Mat &K);
+
 
 bool solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,vector<SFMFeature> &sfm_f);
 
 
-int WINDOWSIZE=10;
+int WINDOWSIZE=15;
 int main(int argc, char **argv)
 {
     // if ( argc != 2 )
@@ -217,24 +268,33 @@ int main(int argc, char **argv)
         vector<float> error; 
 //         chrono::steady_clock::time_point t1 = chrono::steady_clock::now();
         cv::calcOpticalFlowPyrLK( last_color, color, prev_keypoints, next_keypoints, status, error );
-//         chrono::steady_clock::time_point t2 = chrono::steady_clock::now();
-//         chrono::duration<double> time_used = chrono::duration_cast<chrono::duration<double>>( t2-t1 );
-//         cout<<"LK Flow use time："<<time_used.count()<<" seconds."<<endl;
+
+        //         chrono::steady_clock::time_point t2 = chrono::steady_clock::now();
+        //         chrono::duration<double> time_used = chrono::duration_cast<chrono::duration<double>>( t2-t1 );
+        //         cout<<"LK Flow use time："<<time_used.count()<<" seconds."<<endl;
         // 把跟丢的点删掉
 
-	int keypoint_index=0;
+        int keypoint_index = 0;
         for ( auto kp:next_keypoints )
 	{
 	  sfm_f[keypoint_index].observation.push_back(make_pair(index, Eigen::Vector2d{kp.x, kp.y}));
-	  keypoint_index++;
-	}
+      ++keypoint_index;
+    }
         reduceVector(keypoints,status);
 	reduceVector(sfm_f,status);
-        cout<<"tracked keypoints: "<<keypoints.size()<<endl;
-        if (keypoints.size() == 0)
-        {
-            cout<<"all keypoints are lost."<<endl;
-            break; 
+
+
+    //Calculates a fundamental matrix from the corresponding points in two images.
+    //根据两队点算F,以及status再次筛除一些点
+    cv::findFundamentalMat(prev_keypoints, next_keypoints, cv::FM_RANSAC, 1.0, 0.99, status);
+    reduceVector(keypoints, status);
+    reduceVector(sfm_f, status);
+
+    cout << "tracked keypoints: " << keypoints.size() << endl;
+    if (keypoints.size() == 0)
+    {
+        cout << "all keypoints are lost." << endl;
+        break; 
         }
         // 画出 keypoints
 //         cv::Mat img_show = color.clone();
@@ -280,8 +340,8 @@ int main(int argc, char **argv)
     Matrix3d c_Rotation[frame_num];
     Vector3d c_Translation[frame_num];
     Quaterniond c_Quat[frame_num];
-    // double c_rotation[frame_num][4];
-    // double c_translation[frame_num][3];
+    double c_rotation[frame_num][4];
+    double c_translation[frame_num][3];
     Eigen::Matrix<double, 3, 4> Pose[frame_num]; //位姿用于三角化
 //第一帧的值
     c_Quat[l] = q[l].inverse();//旋转是什么意思？？？
@@ -325,39 +385,162 @@ int main(int argc, char **argv)
     for (int i = l + 1; i < frame_num - 1; i++)
     {  triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
     }
-    
+    //4: solve pnp l-1; triangulate l-1 ----- l
+    //             l-2              l-2 ----- l
+    //三角化所有窗口后部分的帧和地l帧
+    //l帧已经被认定为0了，那么其他帧自然就是和他确定
+    for (int i = l - 1; i >= 0; i--)
+    {
+        //solve pnp
+        Matrix3d R_initial = c_Rotation[i + 1];
+        Vector3d P_initial = c_Translation[i + 1];
+        if (!solveFrameByPnP(R_initial, P_initial, i, sfm_f))
+            return false;
+        c_Rotation[i] = R_initial;
+        c_Translation[i] = P_initial;
+        c_Quat[i] = c_Rotation[i];
+        Pose[i].block<3, 3>(0, 0) = c_Rotation[i];
+        Pose[i].block<3, 1>(0, 3) = c_Translation[i];
+        //triangulate
+        triangulateTwoFrames(i, Pose[i], l, Pose[l], sfm_f);
+    }
+    //5: triangulate all other points
+    for (int j = 0; j < sfm_f.size(); j++)
+    {
+        if (sfm_f[j].state == true)
+            continue;
+        if ((int)sfm_f[j].observation.size() >= 2)
+        {
+            Vector2d point0, point1;
+            int frame_0 = sfm_f[j].observation[0].first;
+            point0 = sfm_f[j].observation[0].second;
+            int frame_1 = sfm_f[j].observation.back().first;
+            point1 = sfm_f[j].observation.back().second;
+            Vector3d point_3d;
+            triangulatePoint(Pose[frame_0], Pose[frame_1], point0, point1, point_3d);
+            sfm_f[j].state = true;
+            sfm_f[j].position[0] = point_3d(0);
+            sfm_f[j].position[1] = point_3d(1);
+            sfm_f[j].position[2] = point_3d(2);
+            //cout << "trangulated : " << frame_0 << " " << frame_1 << "  3d point : "  << j << "  " << point_3d.transpose() << endl;
+        }
+
+
+    }
+    //full BA
+    //full BA
+    //全优化方式
+    ceres::Problem problem;
+    ceres::LocalParameterization *local_parameterization = new ceres::QuaternionParameterization();
+    //cout << " begin full BA " << endl;
+    for (int i = 0; i < frame_num; i++)
+    {
+        //double array for ceres
+        c_translation[i][0] = c_Translation[i].x();
+        c_translation[i][1] = c_Translation[i].y();
+        c_translation[i][2] = c_Translation[i].z();
+        c_rotation[i][0] = c_Quat[i].w();
+        c_rotation[i][1] = c_Quat[i].x();
+        c_rotation[i][2] = c_Quat[i].y();
+        c_rotation[i][3] = c_Quat[i].z();
+        problem.AddParameterBlock(c_rotation[i], 4, local_parameterization);
+        problem.AddParameterBlock(c_translation[i], 3);
+        if (i == l)
+        {
+            problem.SetParameterBlockConstant(c_rotation[i]);
+        }
+        if (i == l || i == frame_num - 1)
+        {
+            problem.SetParameterBlockConstant(c_translation[i]);
+        }
+    }
+
+    for (int i = 0; i < sfm_f.size(); i++)
+    {
+        if (sfm_f[i].state != true)
+            continue;
+        for (int j = 0; j < int(sfm_f[i].observation.size()); j++)
+        {
+            int l = sfm_f[i].observation[j].first;
+            ceres::CostFunction *cost_function = ReprojectionError3D::Create(
+                sfm_f[i].observation[j].second.x(),
+                sfm_f[i].observation[j].second.y());
+
+            problem.AddResidualBlock(cost_function, NULL, c_rotation[l], c_translation[l],
+                                     sfm_f[i].position);
+        }
+    }
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::DENSE_SCHUR;
+    //options.minimizer_progress_to_stdout = true;
+    options.max_solver_time_in_seconds = 0.2;
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+    //std::cout << summary.BriefReport() << "\n";
+    if (summary.termination_type == ceres::CONVERGENCE || summary.final_cost < 5e-03)
+    {
+        cout << "vision only BA converge" << endl;
+    }
+    else
+    {
+        cout << "vision only BA not converge " << endl;
+        // return false;
+    }
+    for (int i = 0; i < frame_num; i++)
+    {
+        q[i].w() = c_rotation[i][0];
+        q[i].x() = c_rotation[i][1];
+        q[i].y() = c_rotation[i][2];
+        q[i].z() = c_rotation[i][3];
+        q[i] = q[i].inverse();
+        // cout << "final  q" << " i " << i <<"  " <<q[i].w() << "  " << q[i].vec().transpose() << endl;
+        cout<<"final q  "<<endl;
+        cout<<q[i].toRotationMatrix()<<endl;
+
+        T[i] = -1 * (q[i] * Vector3d(c_translation[i][0], c_translation[i][1], c_translation[i][2]));
+        cout << "final t  "<<endl;
+        cout << T[i](0) << "  " << T[i](1) << "  " << T[i](2) << endl;
+    }
+
+    for (int i = 0; i < (int)sfm_f.size(); i++)
+    {
+        if (sfm_f[i].state)
+            sfm_tracked_points[sfm_f[i].id] = Vector3d(sfm_f[i].position[0], sfm_f[i].position[1], sfm_f[i].position[2]);
+    }
+    // return true;
+
+
     for(int i=0;i<frame_num;i++)
     {
       
     //visual
-      cout<<to_string(i)<<endl;
-      cout<<Pose[i]<<endl;
-    cv::Affine3d M (
-            cv::Affine3d::Mat3 (
-                Pose[i] ( 0,0 ), Pose[i]  ( 0,1 ),Pose[i]  ( 0,2 ),
-                Pose[i]  ( 1,0 ), Pose[i]  ( 1,1 ), Pose[i]  ( 1,2 ),
-                Pose[i]  ( 2,0 ), Pose[i]  ( 2,1 ), Pose[i]  ( 2,2 )
-            ),
-            cv::Affine3d::Vec3 (
-                Pose[i]  ( 0,3 ), Pose[i]  ( 1,3 ), Pose[i]  ( 2,3 )
-            )
-        );
-    
-        cv::Mat img_show = imread(rgb_files[i], CV_LOAD_IMAGE_COLOR);
-	vector<KeyPoint> kp;
-        for ( auto sfm:sfm_f ){
-	  for(unsigned sfmindex=0;sfmindex<sfm.observation.size();sfmindex++){
-	    if (sfm.observation[sfmindex].first==i){
-            cv::circle(img_show, Point(sfm.observation[sfmindex].second(0),sfm.observation[sfmindex].second(1)), 10, cv::Scalar(0, 240, 0), 1);
+      Matrix3d newtmp=q[i].toRotationMatrix();
+      cv::Affine3d M(
+          cv::Affine3d::Mat3(
+              newtmp(0, 0), newtmp(0, 1), newtmp(0, 2),
+              newtmp(1, 0), newtmp(1, 1), newtmp(1, 2),
+              newtmp(2, 0), newtmp(2, 1), newtmp(2, 2)),
+          cv::Affine3d::Vec3(
+              T[i](0), T[i](1), T[i](2)));
+
+      cv::Mat img_show = imread(rgb_files[i], CV_LOAD_IMAGE_COLOR);
+      vector<KeyPoint> kp;
+      for (auto sfm : sfm_f)
+      {
+          for (unsigned sfmindex = 0; sfmindex < sfm.observation.size(); sfmindex++)
+          {
+              if (sfm.observation[sfmindex].first == i)
+              {
+                  cv::circle(img_show, Point(sfm.observation[sfmindex].second(0), sfm.observation[sfmindex].second(1)), 10, cv::Scalar(0, 240, 0), 1);
+              }
+          }
 	    }
-	  }
-	}
-        cv::imshow("corners", img_show);     
-    cv::imshow ( "image", img_show );
+        // cv::imshow("corners", img_show);     
+        cv::imshow ( "image", img_show );
      
-     cv::waitKey ( 0);
-     vis.setWidgetPose ( "Camera", M );
-     vis.spinOnce ( 10, false );
+        cv::waitKey ( 0);
+        vis.setWidgetPose ( "Camera", M );
+        vis.spinOnce ( 10, false );
         cout<<endl;
     }
 
