@@ -382,7 +382,7 @@ int main(int argc, char **argv)
         triangulateTwoFrames(i, Pose[i], frame_num - 1, Pose[frame_num - 1], sfm_f);
       
     }	
-    for (int i = l + 1; i < frame_num - 1; i++)
+    for (int i = l + 1; i < frame_num - 1; --i)
     {  triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
     }
     //4: solve pnp l-1; triangulate l-1 ----- l
@@ -600,7 +600,7 @@ void triangulateTwoFrames(int frame0, Eigen::Matrix<double, 3, 4> &Pose0,
 		}							  
 	}
 }
-
+//看起来初始化的时候这里也没用k，ｔ
 bool solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,vector<SFMFeature> &sfm_f)
 {
 	vector<cv::Point2f> pts_2_vector;
@@ -642,9 +642,9 @@ bool solveFrameByPnP(Matrix3d &R_initial, Vector3d &P_initial, int i,vector<SFMF
 
 	cv::Rodrigues(tmp_r, rvec);
 	cv::eigen2cv(P_initial, t);
-	cv::Mat K = (cv::Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
-	bool pnp_succ;
-	//K在这里内参默认是I都可以吗？？
+    cv::Mat K = (Mat_<double>(3, 3) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1);
+    bool pnp_succ;
+    //K在这里内参默认是I都可以吗？？
 	pnp_succ = cv::solvePnP(pts_3_vector, pts_2_vector, K, D, rvec, t, 1);
 	if(!pnp_succ)
 	{
