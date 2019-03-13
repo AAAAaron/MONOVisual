@@ -32,14 +32,16 @@
 *.app
 
 # 
-bin/
-lib/
-build/
-data/
+bin
+lib
+build
+data
 CMakeFiles
 Makefile
-CMakeFiles/
+CMakeFiles
+vscode
 *.kdev4
 *.cake
-*.txt
+*.json
+
 
