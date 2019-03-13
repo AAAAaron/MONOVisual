@@ -315,6 +315,7 @@ int main(int argc, char **argv)
     // //确定最后一帧的相对值
     // //设置初始值，ql是确定的帧的，t【-1】当然是给出计算的那个部分，以l帧作为起点0
     int l=0;
+
     Eigen::Quaterniond q[frame_num];
     q[l].w() = 1;
     q[l].x() = 0;
@@ -355,6 +356,7 @@ int main(int argc, char **argv)
     c_Translation[frame_num - 1] = -1 * (c_Rotation[frame_num - 1] * T[frame_num - 1]);
     Pose[frame_num - 1].block<3, 3>(0, 0) = c_Rotation[frame_num - 1];
     Pose[frame_num - 1].block<3, 1>(0, 3) = c_Translation[frame_num - 1];
+    
 
     for (int i = l; i < WINDOWSIZE-1; i++)
     {
@@ -382,13 +384,16 @@ int main(int argc, char **argv)
         triangulateTwoFrames(i, Pose[i], frame_num - 1, Pose[frame_num - 1], sfm_f);
       
     }	
-    for (int i = l + 1; i < frame_num - 1; --i)
-    {  triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
+
+    for (int i = l + 1; i < frame_num-1; i++)
+    {  
+        triangulateTwoFrames(l, Pose[l], i, Pose[i], sfm_f);
     }
     //4: solve pnp l-1; triangulate l-1 ----- l
     //             l-2              l-2 ----- l
     //三角化所有窗口后部分的帧和地l帧
     //l帧已经被认定为0了，那么其他帧自然就是和他确定
+
     for (int i = l - 1; i >= 0; i--)
     {
         //solve pnp
